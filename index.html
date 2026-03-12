@@ -212,16 +212,10 @@
 const SHEET_ID  = '1xxF2BxPtaMOuQCyeO918etm0exBMq2WVyBd8nVD7CCU';
 const SHEET_TAB = 'Sheet1';
 
-// Hardcoded fallback names for sparse rows that Google Sheets JSON silently drops.
-// A row is "dropped" when it has only 1 cell filled — GSheets omits it entirely from JSON.
-// Key = 0-based row index of the FIRST lesson row that belongs to this missing header.
-// We detect missing headers at parse time and auto-inject them.
-//
-// HOW TO FIND these: open the sheet, note the row numbers of module-only or block-only rows
-// that have just 1 cell filled. Row 2 = Block1 header (col A only). Row 3 = Module1 header (col B only).
-// For Bonus, find its first module row number similarly.
-const FALLBACK_BLOCK_1  = "1-Blok. Sog\u02BBlom ovqatlanish";
-const FALLBACK_MODULE_1 = "1-modul: Kirish va motivatsiya";
+// Google Sheets JSON quirk: rows with only 1 filled cell are dropped entirely from JSON.
+// Block 1 name and Module 1 name end up stored in COLUMN LABELS (cols[0].label / cols[1].label).
+// We extract them from json.table.cols at parse time.
+// For Bonus block: lessons come directly under block with no module row => synthetic module.
 
 let courseData = {}, allLessons = [], currentBlock = null, currentLesson = null;
 
@@ -241,8 +235,28 @@ async function loadSheet() {
 
 function parseSheetData(json) {
   const rows = json.table.rows;
+  const cols = json.table.cols || [];
   courseData = {}; allLessons = [];
+
+  // Block 1 name and Module 1 name are stored in column LABELS (not rows).
+  // cols[0].label = "Block 1-Blok. Sog'lom ovqatlanish" → extract after "Block "
+  // cols[1].label = "Modul 1-modul: Kirish va motivatsiya" → extract after "Modul "
+  const colALabel = (cols[0]?.label || '').trim();
+  const colBLabel = (cols[1]?.label || '').trim();
+  const block1Name = colALabel.replace(/^Block\s*/i, '') || '1-Blok';
+  const module1Name = colBLabel.replace(/^Modul\s*/i, '') || '1-modul';
+
   let curBlock = null, curModule = null;
+
+  // Pre-seed Block 1 and Module 1 from column headers
+  if (block1Name) {
+    curBlock = block1Name;
+    courseData[curBlock] = { title: curBlock, modules: {} };
+  }
+  if (module1Name && curBlock) {
+    curModule = module1Name;
+    courseData[curBlock].modules[curModule] = { title: curModule, lessons: [] };
+  }
 
   rows.forEach((row) => {
     const cells = row.c || [];
@@ -254,7 +268,7 @@ function parseSheetData(json) {
 
     const A = v(0), B = v(1), C = v(2), D = v(3), E = v(4), F = v(5);
 
-    // Skip header row
+    // Skip any stray header row
     if (A === 'Block' || A === 'Blok') return;
 
     // --- BLOCK HEADER: A has value, C and D empty ---
@@ -262,7 +276,6 @@ function parseSheetData(json) {
       curBlock = A;
       curModule = null;
       if (!courseData[curBlock]) courseData[curBlock] = { title: A, modules: {} };
-      // If B also filled on same row (unusual), treat as first module too
       if (B) {
         curModule = B;
         if (!courseData[curBlock].modules[curModule])
@@ -273,9 +286,8 @@ function parseSheetData(json) {
 
     // --- MODULE HEADER: B has value, A/C/D empty ---
     if (!A && B && !C && !D) {
-      // Block 1 header was a single-cell row — dropped by GSheets JSON. Auto-create it.
       if (!curBlock) {
-        curBlock = FALLBACK_BLOCK_1;
+        curBlock = block1Name;
         if (!courseData[curBlock]) courseData[curBlock] = { title: curBlock, modules: {} };
       }
       curModule = B;
@@ -286,17 +298,17 @@ function parseSheetData(json) {
 
     // --- LESSON ROW: has title (D) or number (C) ---
     if ((D || C) && curBlock) {
-      // Module 1 header was a single-cell row — dropped by GSheets JSON. Auto-create it.
+      // No module yet (e.g. Bonus block has lessons directly under block header)
       if (!curModule) {
-        curModule = FALLBACK_MODULE_1;
+        curModule = curBlock; // use block name as synthetic module name
         if (!courseData[curBlock].modules[curModule])
-          courseData[curBlock].modules[curModule] = { title: curModule, lessons: [] };
+          courseData[curBlock].modules[curModule] = { title: curBlock, lessons: [] };
       }
 
       const embed = (E && E !== '#N/A') ? E : '';
       const link  = (F && F !== '#N/A') ? F : '';
       let src = '';
-      if (embed.startsWith('<iframe')) { const m = embed.match(/src=["']([^"']+)["']/); if (m) src = m[1]; }
+      if (embed.startsWith('<iframe')) { const m = embed.match(/src=["']([^"']+)['"]/); if (m) src = m[1]; }
       else if (embed.startsWith('http')) src = embed;
       else if (link.startsWith('http'))  src = link;
 
@@ -309,7 +321,8 @@ function parseSheetData(json) {
 
   console.log('Blocks found:', Object.keys(courseData));
   Object.entries(courseData).forEach(([bk, bd]) => {
-    console.log(bk, '→', Object.keys(bd.modules).length, 'modules');
+    console.log(bk, '\u2192', Object.keys(bd.modules).length, 'modules',
+      Object.values(bd.modules).reduce((s,m)=>s+m.lessons.length,0), 'lessons');
   });
 }
 
